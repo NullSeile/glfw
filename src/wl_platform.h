@@ -43,11 +43,12 @@ typedef VkResult (APIENTRY *PFN_vkCreateWaylandSurfaceKHR)(VkInstance,const VkWa
 typedef VkBool32 (APIENTRY *PFN_vkGetPhysicalDeviceWaylandPresentationSupportKHR)(VkPhysicalDevice,uint32_t,struct wl_display*);
 
 #include "xkb_unicode.h"
+#include "posix_poll.h"
 
-typedef int (* PFN_wl_display_flush)(struct wl_display *display);
-typedef void (* PFN_wl_display_cancel_read)(struct wl_display *display);
-typedef int (* PFN_wl_display_dispatch_pending)(struct wl_display *display);
-typedef int (* PFN_wl_display_read_events)(struct wl_display *display);
+typedef int (* PFN_wl_display_flush)(struct wl_display* display);
+typedef void (* PFN_wl_display_cancel_read)(struct wl_display* display);
+typedef int (* PFN_wl_display_dispatch_pending)(struct wl_display* display);
+typedef int (* PFN_wl_display_read_events)(struct wl_display* display);
 typedef struct wl_display* (* PFN_wl_display_connect)(const char*);
 typedef void (* PFN_wl_display_disconnect)(struct wl_display*);
 typedef int (* PFN_wl_display_roundtrip)(struct wl_display*);
@@ -166,8 +167,8 @@ typedef struct xkb_state* (* PFN_xkb_state_new)(struct xkb_keymap*);
 typedef void (* PFN_xkb_state_unref)(struct xkb_state*);
 typedef int (* PFN_xkb_state_key_get_syms)(struct xkb_state*, xkb_keycode_t, const xkb_keysym_t**);
 typedef enum xkb_state_component (* PFN_xkb_state_update_mask)(struct xkb_state*, xkb_mod_mask_t, xkb_mod_mask_t, xkb_mod_mask_t, xkb_layout_index_t, xkb_layout_index_t, xkb_layout_index_t);
-typedef xkb_mod_mask_t (* PFN_xkb_state_serialize_mods)(struct xkb_state*, enum xkb_state_component);
 typedef xkb_layout_index_t (* PFN_xkb_state_key_get_layout)(struct xkb_state*,xkb_keycode_t);
+typedef int (* PFN_xkb_state_mod_index_is_active)(struct xkb_state*,xkb_mod_index_t,enum xkb_state_component);
 #define xkb_context_new _glfw.wl.xkb.context_new
 #define xkb_context_unref _glfw.wl.xkb.context_unref
 #define xkb_keymap_new_from_string _glfw.wl.xkb.keymap_new_from_string
@@ -179,8 +180,8 @@ typedef xkb_layout_index_t (* PFN_xkb_state_key_get_layout)(struct xkb_state*,xk
 #define xkb_state_unref _glfw.wl.xkb.state_unref
 #define xkb_state_key_get_syms _glfw.wl.xkb.state_key_get_syms
 #define xkb_state_update_mask _glfw.wl.xkb.state_update_mask
-#define xkb_state_serialize_mods _glfw.wl.xkb.state_serialize_mods
 #define xkb_state_key_get_layout _glfw.wl.xkb.state_key_get_layout
+#define xkb_state_mod_index_is_active _glfw.wl.xkb.state_mod_index_is_active
 
 typedef struct xkb_compose_table* (* PFN_xkb_compose_table_new_from_locale)(struct xkb_context*, const char*, enum xkb_compose_compile_flags);
 typedef void (* PFN_xkb_compose_table_unref)(struct xkb_compose_table*);
@@ -217,6 +218,13 @@ typedef struct _GLFWdecorationWayland
     struct wl_subsurface*       subsurface;
     struct wp_viewport*         viewport;
 } _GLFWdecorationWayland;
+
+typedef struct _GLFWofferWayland
+{
+    struct wl_data_offer*       offer;
+    GLFWbool                    text_plain_utf8;
+    GLFWbool                    text_uri_list;
+} _GLFWofferWayland;
 
 // Wayland-specific per-window data
 //
@@ -280,14 +288,22 @@ typedef struct _GLFWlibraryWayland
     struct wl_keyboard*         keyboard;
     struct wl_data_device_manager*          dataDeviceManager;
     struct wl_data_device*      dataDevice;
-    struct wl_data_offer*       dataOffer;
-    struct wl_data_source*      dataSource;
     struct xdg_wm_base*         wmBase;
     struct zxdg_decoration_manager_v1*      decorationManager;
     struct wp_viewporter*       viewporter;
     struct zwp_relative_pointer_manager_v1* relativePointerManager;
     struct zwp_pointer_constraints_v1*      pointerConstraints;
     struct zwp_idle_inhibit_manager_v1*     idleInhibitManager;
+
+    _GLFWofferWayland*          offers;
+    unsigned int                offerCount;
+
+    struct wl_data_offer*       selectionOffer;
+    struct wl_data_source*      selectionSource;
+
+    struct wl_data_offer*       dragOffer;
+    _GLFWwindow*                dragFocus;
+    uint32_t                    dragSerial;
 
     int                         compositorVersion;
     int                         seatVersion;
@@ -305,9 +321,6 @@ typedef struct _GLFWlibraryWayland
     int                         keyboardLastKey;
     int                         keyboardLastScancode;
     char*                       clipboardString;
-    size_t                      clipboardSize;
-    char*                       clipboardSendString;
-    size_t                      clipboardSendSize;
     int                         timerfd;
     short int                   keycodes[256];
     short int                   scancodes[GLFW_KEY_LAST + 1];
@@ -321,12 +334,12 @@ typedef struct _GLFWlibraryWayland
 
         struct xkb_compose_state* composeState;
 
-        xkb_mod_mask_t          controlMask;
-        xkb_mod_mask_t          altMask;
-        xkb_mod_mask_t          shiftMask;
-        xkb_mod_mask_t          superMask;
-        xkb_mod_mask_t          capsLockMask;
-        xkb_mod_mask_t          numLockMask;
+        xkb_mod_index_t         controlIndex;
+        xkb_mod_index_t         altIndex;
+        xkb_mod_index_t         shiftIndex;
+        xkb_mod_index_t         superIndex;
+        xkb_mod_index_t         capsLockIndex;
+        xkb_mod_index_t         numLockIndex;
         unsigned int            modifiers;
 
         PFN_xkb_context_new context_new;
@@ -340,8 +353,8 @@ typedef struct _GLFWlibraryWayland
         PFN_xkb_state_unref state_unref;
         PFN_xkb_state_key_get_syms state_key_get_syms;
         PFN_xkb_state_update_mask state_update_mask;
-        PFN_xkb_state_serialize_mods state_serialize_mods;
         PFN_xkb_state_key_get_layout state_key_get_layout;
+        PFN_xkb_state_mod_index_is_active state_mod_index_is_active;
 
         PFN_xkb_compose_table_new_from_locale compose_table_new_from_locale;
         PFN_xkb_compose_table_unref compose_table_unref;
@@ -423,7 +436,7 @@ GLFWbool _glfwConnectWayland(int platformID, _GLFWplatform* platform);
 int _glfwInitWayland(void);
 void _glfwTerminateWayland(void);
 
-int _glfwCreateWindowWayland(_GLFWwindow* window, const _GLFWwndconfig* wndconfig, const _GLFWctxconfig* ctxconfig, const _GLFWfbconfig* fbconfig);
+GLFWbool _glfwCreateWindowWayland(_GLFWwindow* window, const _GLFWwndconfig* wndconfig, const _GLFWctxconfig* ctxconfig, const _GLFWfbconfig* fbconfig);
 void _glfwDestroyWindowWayland(_GLFWwindow* window);
 void _glfwSetWindowTitleWayland(_GLFWwindow* window, const char* title);
 void _glfwSetWindowIconWayland(_GLFWwindow* window, int count, const GLFWimage* images);
@@ -444,12 +457,12 @@ void _glfwHideWindowWayland(_GLFWwindow* window);
 void _glfwRequestWindowAttentionWayland(_GLFWwindow* window);
 void _glfwFocusWindowWayland(_GLFWwindow* window);
 void _glfwSetWindowMonitorWayland(_GLFWwindow* window, _GLFWmonitor* monitor, int xpos, int ypos, int width, int height, int refreshRate);
-int _glfwWindowFocusedWayland(_GLFWwindow* window);
-int _glfwWindowIconifiedWayland(_GLFWwindow* window);
-int _glfwWindowVisibleWayland(_GLFWwindow* window);
-int _glfwWindowMaximizedWayland(_GLFWwindow* window);
-int _glfwWindowHoveredWayland(_GLFWwindow* window);
-int _glfwFramebufferTransparentWayland(_GLFWwindow* window);
+GLFWbool _glfwWindowFocusedWayland(_GLFWwindow* window);
+GLFWbool _glfwWindowIconifiedWayland(_GLFWwindow* window);
+GLFWbool _glfwWindowVisibleWayland(_GLFWwindow* window);
+GLFWbool _glfwWindowMaximizedWayland(_GLFWwindow* window);
+GLFWbool _glfwWindowHoveredWayland(_GLFWwindow* window);
+GLFWbool _glfwFramebufferTransparentWayland(_GLFWwindow* window);
 void _glfwSetWindowResizableWayland(_GLFWwindow* window, GLFWbool enabled);
 void _glfwSetWindowDecoratedWayland(_GLFWwindow* window, GLFWbool enabled);
 void _glfwSetWindowFloatingWayland(_GLFWwindow* window, GLFWbool enabled);
@@ -457,7 +470,7 @@ float _glfwGetWindowOpacityWayland(_GLFWwindow* window);
 void _glfwSetWindowOpacityWayland(_GLFWwindow* window, float opacity);
 void _glfwSetWindowMousePassthroughWayland(_GLFWwindow* window, GLFWbool enabled);
 
-void _glfwSetRawMouseMotionWayland(_GLFWwindow *window, GLFWbool enabled);
+void _glfwSetRawMouseMotionWayland(_GLFWwindow* window, GLFWbool enabled);
 GLFWbool _glfwRawMouseMotionSupportedWayland(void);
 
 void _glfwPollEventsWayland(void);
@@ -470,8 +483,8 @@ void _glfwSetCursorPosWayland(_GLFWwindow* window, double xpos, double ypos);
 void _glfwSetCursorModeWayland(_GLFWwindow* window, int mode);
 const char* _glfwGetScancodeNameWayland(int scancode);
 int _glfwGetKeyScancodeWayland(int key);
-int _glfwCreateCursorWayland(_GLFWcursor* cursor, const GLFWimage* image, int xhot, int yhot);
-int _glfwCreateStandardCursorWayland(_GLFWcursor* cursor, int shape);
+GLFWbool _glfwCreateCursorWayland(_GLFWcursor* cursor, const GLFWimage* image, int xhot, int yhot);
+GLFWbool _glfwCreateStandardCursorWayland(_GLFWcursor* cursor, int shape);
 void _glfwDestroyCursorWayland(_GLFWcursor* cursor);
 void _glfwSetCursorWayland(_GLFWwindow* window, _GLFWcursor* cursor);
 void _glfwSetClipboardStringWayland(const char* string);
@@ -482,7 +495,7 @@ EGLNativeDisplayType _glfwGetEGLNativeDisplayWayland(void);
 EGLNativeWindowType _glfwGetEGLNativeWindowWayland(_GLFWwindow* window);
 
 void _glfwGetRequiredInstanceExtensionsWayland(char** extensions);
-int _glfwGetPhysicalDevicePresentationSupportWayland(VkInstance instance, VkPhysicalDevice device, uint32_t queuefamily);
+GLFWbool _glfwGetPhysicalDevicePresentationSupportWayland(VkInstance instance, VkPhysicalDevice device, uint32_t queuefamily);
 VkResult _glfwCreateWindowSurfaceWayland(VkInstance instance, _GLFWwindow* window, const VkAllocationCallbacks* allocator, VkSurfaceKHR* surface);
 
 void _glfwFreeMonitorWayland(_GLFWmonitor* monitor);
@@ -496,4 +509,7 @@ void _glfwSetGammaRampWayland(_GLFWmonitor* monitor, const GLFWgammaramp* ramp);
 
 void _glfwAddOutputWayland(uint32_t name, uint32_t version);
 GLFWbool _glfwInputTextWayland(_GLFWwindow* window, uint32_t scancode);
+
+void _glfwAddSeatListenerWayland(struct wl_seat* seat);
+void _glfwAddDataDeviceListenerWayland(struct wl_data_device* device);
 
