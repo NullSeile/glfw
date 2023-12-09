@@ -1,6 +1,7 @@
 # Custom stuff
 bin/
 bin-int/
+.vscode
 
 # The canonical out-of-tree build subdirectory
 build
