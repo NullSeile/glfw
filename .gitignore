@@ -5,6 +5,7 @@ bin-int/
 
 # The canonical out-of-tree build subdirectory
 build
+build-*
 
 # Visual Studio clutter
 _ReSharper*
